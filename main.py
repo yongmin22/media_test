@@ -48,7 +48,7 @@ def main():
         st.divider()
         st.header("차단 우회 (403 에러 발생 시)")
         use_mobile_ua = st.checkbox("모바일 기기로 위장 (우회 모드)", help="HTTP 403 에러가 뜰 때 체크해보세요.")
-        use_cookies = st.checkbox("브라우저 쿠키 사용 (Chrome)", help="로그인이 필요한 영상이거나 강력한 차단이 있을 때 사용합니다. 로컬 PC의 크롬 브라우저 쿠키를 가져옵니다.")
+        use_cookies = st.selectbox("브라우저 쿠키 사용", ["사용 안 함", "Chrome", "Edge", "Firefox", "Brave"], help="로그인이 필요한 영상이거나 강력한 차단이 있을 때 사용합니다. 현재 사용 중인 브라우저는 잠겨서 오류가 날 수 있으니 평소에 안 쓰는 브라우저를 선택하는 것이 좋습니다.")
         
     url_type = st.radio("다운로드 소스 선택", ["단일 URL", "재생목록 (Playlist) URL"])
     url_input = st.text_input("YouTube URL 입력", placeholder="https://www.youtube.com/...")
@@ -66,6 +66,14 @@ def main():
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        st.markdown("#### 시스템 로그")
+        log_output = st.empty()
+        log_messages = []
+        
+        def update_log_ui(msg):
+            log_messages.append(msg)
+            log_output.code("\n".join(log_messages[-15:]), language="text")
+            
         try:
             import yt_dlp
         except ImportError:
@@ -82,13 +90,14 @@ def main():
         }
         
         # --- 우회 옵션 적용 ---
-        if use_cookies:
-            ydl_opts['cookiesfrombrowser'] = ('chrome', ) # 크롬 브라우저 쿠키 사용
+        if use_cookies != "사용 안 함":
+            ydl_opts['cookiesfrombrowser'] = (use_cookies.lower(), ) # 선택한 브라우저 쿠키 사용
             
         if use_mobile_ua:
             ydl_opts['http_headers'] = {
                 'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
             }
+            ydl_opts['extractor_args'] = {'youtube': ['client=android']}
         # --------------------
         
         # 2. Paths & Naming
@@ -126,9 +135,14 @@ def main():
             
         # Logging config (custom logger)
         class MyLogger:
-            def debug(self, msg): pass
-            def warning(self, msg): pass
+            def debug(self, msg): 
+                # yt-dlp의 일반 디버그 메시지 중 의미 있는 것만 표시하거나 통과시킴
+                if "[download] Destination" in msg or "[download] 100%" in msg:
+                    pass
+            def warning(self, msg): 
+                update_log_ui(f"[WARNING] {msg}")
             def error(self, msg):
+                update_log_ui(f"[ERROR] {msg}")
                 # 힐링(치유) 프로세스는 Streamlit 구동 안정성을 위해 제거하고 에러 로깅만 수행
                 if "sign in to confirm you're not a bot" in msg.lower() or "http error 403" in msg.lower():
                     st.toast(f"차단/오류 감지됨 (건너뜀): {msg[:50]}...")
@@ -140,6 +154,7 @@ def main():
         def my_hook(d):
             if d['status'] == 'finished':
                 filename = d['filename']
+                update_log_ui(f"[SUCCESS] 다운로드 완료: {os.path.basename(filename)}")
                 st.toast(f"다운로드 완료: {os.path.basename(filename)}")
                 finished_items.append(filename)
                 log_event(url_input, mode_key, "success", output_path=filename)
