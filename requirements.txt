@@ -1,4 +1,2 @@
 streamlit>=1.33.0
 yt-dlp>=2026.3.17
-ffmpeg
-nodejs
