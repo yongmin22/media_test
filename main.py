@@ -17,7 +17,10 @@ if current_dir not in sys.path:
 try:
     from scripts.sensors.check_block import check_for_blocks
 except ImportError:
-    def check_for_blocks(msg): return None
+    def check_for_blocks(msg): 
+        if "403" in msg or "Forbidden" in msg:
+            return "IP 차단 (403 Forbidden)"
+        return None
 
 # --- Configuration ---
 LOGS_DIR = os.path.join(current_dir, "logs")
@@ -40,24 +43,31 @@ def is_ffmpeg_installed():
 
 def main():
     st.set_page_config(page_title="YT-Harness Direct", page_icon="📦", layout="wide")
-    st.title("📦 YouTube Downloader [배송 시스템 가동]")
+    st.title("📦 YouTube Downloader [v2.6 - 차단 대응]")
     
     # [Harness] 시스템 상태 확인
     ffmpeg_available = is_ffmpeg_installed()
     
     with st.sidebar:
-        st.header("⚙️ Harness Config")
+        st.header("⚙️ Harness Control")
         if not ffmpeg_available:
-            st.warning("⚠️ FFmpeg가 설치되지 않았습니다. 고화질 병합이 불가능하여 단일 파일(최대 720p) 모드로 동작합니다.")
-            st.info("해결책: 깃허브에 'packages.txt' 파일을 만들고 'ffmpeg'를 입력해 업로드하세요.")
+            st.warning("⚠️ FFmpeg 미설치: 고화질 병합 불가 (720p 제한)")
             
         mode = st.radio("포맷", ["영상 (MP4)", "오디오 (MP3)"])
         quality = st.select_slider("화질", options=["360p", "720p", "1080p"], value="1080p")
-        st.info("차단 시 cookies.txt를 업로드하세요.")
-        cookie_file = st.file_uploader("cookies.txt", type=["txt"])
+        
+        st.write("---")
+        st.subheader("🛡️ 차단 우회 신분증 (쿠키)")
+        st.markdown("""
+        **403 에러 발생 시 대처법:**
+        1. 크롬 확장프로그램 [Get cookies.txt] 설치
+        2. 유튜브 접속 후 쿠키 추출
+        3. 아래에 업로드 후 재시도
+        """)
+        cookie_file = st.file_uploader("cookies.txt 업로드", type=["txt"])
 
     st.subheader("1단계: 수집 대상 설정")
-    url_input = st.text_input("YouTube URL (단일 또는 재생목록)", placeholder="https://www.youtube.com/...")
+    url_input = st.text_input("YouTube URL", placeholder="https://www.youtube.com/...")
 
     if 'delivered_files' not in st.session_state:
         st.session_state.delivered_files = []
@@ -80,22 +90,24 @@ def main():
                         fname = d.get('info_dict').get('filepath', d.get('filename'))
                         local_downloads.append(fname)
 
+                # [Harness] 차단 우회 및 네트워크 안정화 옵션
                 ydl_opts = {
                     'quiet': True,
                     'no_warnings': True,
                     'progress_hooks': [progress_hook],
                     'cookiesfrombrowser': None,
+                    'nocheckcertificate': True,      # 인증서 체크 건너뛰기 (네트워크 에러 방지)
+                    'ignoreerrors': True,            # 일부 영상 실패 시에도 중단 방지
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 }
 
-                # [Harness] 동적 포맷 결정 (FFmpeg 유무에 따른 최적화)
+                # 동적 포맷 결정
                 if mode_key == "video":
                     h = quality.replace("p", "")
                     if ffmpeg_available:
-                        # FFmpeg가 있으면 영상/음성 병합 포맷 사용 (최고화질 가능)
                         ydl_opts['format'] = f'bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/best[height<={h}][ext=mp4]/best'
                         ydl_opts['merge_output_format'] = 'mp4'
                     else:
-                        # FFmpeg가 없으면 이미 합쳐진 단일 파일만 요청 (보통 720p 이하)
                         ydl_opts['format'] = f'best[height<={h}][ext=mp4]/best[ext=mp4]/best'
                 else:
                     if ffmpeg_available:
@@ -104,10 +116,9 @@ def main():
                             'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320',
                         }]
                     else:
-                        # FFmpeg가 없으면 MP3 변환 불가. 원본 오디오(주로 m4a/webm)를 그대로 받음
                         ydl_opts['format'] = 'bestaudio/best'
-                        st.warning("FFmpeg 부재로 MP3 변환을 건너뛰고 원본 오디오 형식으로 다운로드합니다.")
 
+                # [Harness] 쿠키 주입
                 if cookie_file:
                     c_path = os.path.join(tmp_work_dir, "cookies.txt")
                     with open(c_path, "wb") as f: f.write(cookie_file.getvalue())
@@ -115,14 +126,24 @@ def main():
 
                 ydl_opts['outtmpl'] = os.path.join(tmp_work_dir, '%(title)s.%(ext)s')
 
+                # [Logger] 403 에러 감지용 로거
+                class YdlLogger:
+                    def debug(self, msg): pass
+                    def warning(self, msg): pass
+                    def error(self, msg):
+                        block_type = check_for_blocks(msg)
+                        if block_type:
+                            st.error(f"🛑 {block_type}: 유튜브가 서버 IP를 차단했습니다. 사이드바의 가이드에 따라 쿠키를 업로드하세요.")
+                
+                ydl_opts['logger'] = YdlLogger()
+
                 with st.status("🏗️ 서버 창고로 데이터 수집 중...", expanded=True) as status:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         ydl.download([url_input])
-                    status.update(label="✅ 수집 완료! 배송 준비 중...", state="complete")
+                    status.update(label="✅ 수집 프로세스 종료", state="complete")
 
                 if local_downloads:
                     for fpath in local_downloads:
-                        # FFmpeg가 있을 때만 mp3 확장자 체크
                         if ffmpeg_available and mode_key == "audio" and not fpath.endswith(".mp3"):
                             potential_mp3 = os.path.splitext(fpath)[0] + ".mp3"
                             if os.path.exists(potential_mp3):
@@ -135,7 +156,7 @@ def main():
                                     "data": f.read()
                                 })
                 else:
-                    st.error("파일 수집에 실패했습니다. (유튜브 정책 변경 또는 차단 가능성)")
+                    st.warning("⚠️ 수집된 파일이 없습니다. URL이 올바른지, 혹은 403 차단이 발생했는지 확인하세요.")
             
             except Exception as e:
                 st.error(f"수집 실패: {e}")
@@ -167,10 +188,6 @@ def main():
                 mime="application/zip",
                 use_container_width=True
             )
-            
-            with st.expander("개별 파일 보기"):
-                for f in st.session_state.delivered_files:
-                    st.write(f"📄 {f['name']}")
 
 if __name__ == "__main__":
     main()
