@@ -1,18 +1,11 @@
 import streamlit as st
 import os
-import sys
 import datetime
 import json
-import logging
-
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from scripts.sensors.check_block import check_for_blocks, heal
-from scripts.sensors.check_quality import verify_contract
 
 # --- Configuration & Setup ---
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# 단일 파일로 실행 시 현재 디렉토리를 기준으로 폴더를 생성합니다.
+BASE_DIR = os.getcwd()
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
@@ -21,7 +14,7 @@ os.makedirs(os.path.join(DOWNLOADS_DIR, "music"), exist_ok=True)
 os.makedirs(os.path.join(DOWNLOADS_DIR, "quarantine"), exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-def log_event(url, mode, event, detail="", output_path=None, error=None, heal_step=None):
+def log_event(url, mode, event, detail="", output_path=None, error=None):
     today = datetime.datetime.now().strftime("%Y%m%d")
     log_file = os.path.join(LOGS_DIR, f"download_{today}.jsonl")
     
@@ -36,24 +29,22 @@ def log_event(url, mode, event, detail="", output_path=None, error=None, heal_st
         log_data["output_path"] = output_path
     if error:
         log_data["error"] = error
-    if heal_step is not None:
-        log_data["heal_step"] = heal_step
         
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
 
 # --- UI Functions ---
 def main():
-    st.set_page_config(page_title="YouTube Downloader v2", page_icon="🎬", layout="wide")
+    st.set_page_config(page_title="YouTube Downloader [Standalone]", page_icon="🎬", layout="wide")
     
-    st.title("🎬 YouTube Downloader [v2]")
+    st.title("🎬 YouTube Downloader [Standalone]")
+    st.markdown("이 앱은 단일 `main.py` 파일로 구동되며, 외부 스크립트(센서 등) 의존성 없이 독립적으로 실행됩니다. (힐링 프로세스 제거)")
     
     with st.sidebar:
         st.header("설정")
         mode = st.radio("다운로드 모드", ["영상 (MP4)", "오디오 (MP3)"])
         quality = st.radio("화질", ["1080p 이하 (기본)", "최고화질"])
-        auto_heal = st.checkbox("자가 치유 자동 실행", value=True)
-    
+        
     url_type = st.radio("다운로드 소스 선택", ["단일 URL", "재생목록 (Playlist) URL"])
     url_input = st.text_input("YouTube URL 입력", placeholder="https://www.youtube.com/...")
     
@@ -67,11 +58,9 @@ def main():
         st.write("---")
         st.subheader("진행 상황")
         
-        # UI Elements for progress
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Import yt_dlp here to ensure it's available or handle import error
         try:
             import yt_dlp
         except ImportError:
@@ -82,7 +71,7 @@ def main():
         
         # 1. Base Options
         ydl_opts = {
-            'ignoreerrors': True,  # 헌법: 예외 처리 루프 (오류 시 다음으로 진행)
+            'ignoreerrors': True,  # 재생목록 오류 발생 시 중단 없이 다음으로 진행
             'quiet': True,
             'no_warnings': True,
         }
@@ -125,50 +114,29 @@ def main():
             def debug(self, msg): pass
             def warning(self, msg): pass
             def error(self, msg):
-                block = check_for_blocks(msg)
-                if block:
-                    st.toast(f"차단 감지됨: {block}")
-                    log_event(url_input, mode_key, "fail", detail=msg, error=block)
-                else:
-                    log_event(url_input, mode_key, "fail", error=msg)
+                # 힐링(치유) 프로세스는 Streamlit 구동 안정성을 위해 제거하고 에러 로깅만 수행
+                if "sign in to confirm you're not a bot" in msg.lower() or "http error 403" in msg.lower():
+                    st.toast(f"차단/오류 감지됨 (건너뜀): {msg[:50]}...")
+                log_event(url_input, mode_key, "fail", error=msg)
                     
         ydl_opts['logger'] = MyLogger()
         
-        # Progress Hook
         finished_items = []
         def my_hook(d):
             if d['status'] == 'finished':
                 filename = d['filename']
-                # yt-dlp의 임시 파일 이름 대신 실제 출력 파일 이름을 추론하거나, postprocessor hook에서 검증해야 함.
-                # 단순화를 위해 여기서 로깅
                 st.toast(f"다운로드 완료: {os.path.basename(filename)}")
                 finished_items.append(filename)
+                log_event(url_input, mode_key, "success", output_path=filename)
                 
         ydl_opts['progress_hooks'] = [my_hook]
         
-        # Post-processor Hook for Quality Check
-        def pp_hook(d):
-            if d['status'] == 'finished':
-                final_file = d['info_dict'].get('filepath', d.get('filename'))
-                if final_file and os.path.exists(final_file):
-                    is_valid, msg = verify_contract(final_file, mode_key)
-                    if not is_valid:
-                        st.warning(f"품질 위반 격리: {os.path.basename(final_file)} ({msg})")
-                        log_event(url_input, mode_key, "fail", detail="Quarantined", error=msg)
-                    else:
-                        log_event(url_input, mode_key, "success", output_path=final_file)
-                        
-        ydl_opts['postprocessor_hooks'] = [pp_hook]
-
-        # Execute Download
         status_text.info("다운로드를 준비 중입니다...")
         log_event(url_input, mode_key, "start", detail=f"Playlist: {ydl_opts.get('yes_playlist', False)}")
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # To show proper progress for playlists, we could optionally extract_info first
-                # but it might be slow. We'll rely on the simple hooks for now.
-                status_text.info("다운로드 중입니다. 오류가 발생해도 계속 진행됩니다...")
+                status_text.info("다운로드 중입니다. 오류가 발생해도 건너뛰고 계속 진행됩니다...")
                 ydl.download([url_input])
                 
             progress_bar.progress(100)
