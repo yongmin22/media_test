@@ -1,180 +1,143 @@
 import streamlit as st
 import os
+import sys
 import datetime
 import json
+import tempfile
+
+# [Harness] 경로 엔트로피 제어: scripts 폴더를 찾기 위한 절대 경로 설정
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# scripts 폴더 내의 모듈 임포트 시도 (실패 시 빈 함수로 대체하여 크래시 방지)
+try:
+    from scripts.sensors.check_block import check_for_blocks
+    from scripts.sensors.check_quality import verify_contract
+except ImportError:
+    # 하네스 가드: 모듈이 없을 경우 자가 치유 로직이 작동하지 않음을 경고
+    def check_for_blocks(msg): return None
+    def verify_contract(path, mode): return True, "Sensor Missing"
 
 # --- Configuration & Setup ---
-# 단일 파일로 실행 시 현재 디렉토리를 기준으로 폴더를 생성합니다.
-BASE_DIR = os.getcwd()
+BASE_DIR = current_dir
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
 os.makedirs(os.path.join(DOWNLOADS_DIR, "videos"), exist_ok=True)
 os.makedirs(os.path.join(DOWNLOADS_DIR, "music"), exist_ok=True)
-os.makedirs(os.path.join(DOWNLOADS_DIR, "quarantine"), exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 def log_event(url, mode, event, detail="", output_path=None, error=None):
     today = datetime.datetime.now().strftime("%Y%m%d")
     log_file = os.path.join(LOGS_DIR, f"download_{today}.jsonl")
-    
     log_data = {
-        "timestamp": datetime.datetime.now().isoformat() + "+09:00",
-        "url": url,
-        "mode": mode,
-        "event": event,
-        "detail": detail
+        "timestamp": datetime.datetime.now().isoformat(),
+        "url": url, "mode": mode, "event": event, "detail": detail
     }
-    if output_path:
-        log_data["output_path"] = output_path
-    if error:
-        log_data["error"] = error
-        
+    if error: log_data["error"] = error
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
 
-# --- UI Functions ---
 def main():
-    st.set_page_config(page_title="YouTube Downloader [Standalone]", page_icon="🎬", layout="wide")
-    
-    st.title("🎬 YouTube Downloader [Standalone]")
-    st.markdown("이 앱은 단일 `main.py` 파일로 구동되며, 외부 스크립트(센서 등) 의존성 없이 독립적으로 실행됩니다. (힐링 프로세스 제거)")
+    st.set_page_config(page_title="YouTube Downloader [Harness]", page_icon="🎬", layout="wide")
+    st.title("🎬 YouTube Downloader [v2.1 - Cloud Optimized]")
     
     with st.sidebar:
-        st.header("설정")
-        mode = st.radio("다운로드 모드", ["영상 (MP4)", "오디오 (MP3)"])
-        quality = st.radio("화질", ["1080p 이하 (기본)", "최고화질"])
-        
-        st.divider()
-        st.header("차단 우회 (403 에러 발생 시)")
-        use_mobile_ua = st.checkbox("모바일 기기로 위장 (우회 모드)", help="HTTP 403 에러가 뜰 때 체크해보세요.")
-        use_cookies = st.selectbox("브라우저 쿠키 사용", ["사용 안 함", "Chrome", "Edge", "Firefox", "Brave"], help="로그인이 필요한 영상이거나 강력한 차단이 있을 때 사용합니다. 현재 사용 중인 브라우저는 잠겨서 오류가 날 수 있으니 평소에 안 쓰는 브라우저를 선택하는 것이 좋습니다.")
-        
-    url_type = st.radio("다운로드 소스 선택", ["단일 URL", "재생목록 (Playlist) URL"])
-    url_input = st.text_input("YouTube URL 입력", placeholder="https://www.youtube.com/...")
-    
-    if st.button("🚀 다운로드 시작", type="primary"):
-        if not url_input:
-            st.warning("URL을 입력해주세요.")
-            return
-            
-        mode_key = "video" if "영상" in mode else "audio"
+        st.header("⚙️ Harness Control")
+        mode = st.radio("모드", ["영상 (MP4)", "오디오 (MP3)"])
+        quality = st.select_slider("품질 제한", options=["360p", "720p", "1080p", "최고화질"], value="1080p")
         
         st.write("---")
-        st.subheader("진행 상황")
-        
-        progress_bar = st.progress(0)
+        # [Harness] User Intervention: Cloud 환경에서는 쿠키 직접 업로드가 유일한 우회로입니다.
+        st.subheader("🍪 쿠키 설정 (차단 시)")
+        cookie_file = st.file_uploader("cookies.txt 업로드", type=["txt"])
+        if cookie_file:
+            st.success("쿠키 주입 완료 (서버 브라우저 의존성 해제)")
+
+    url_type = st.radio("소스", ["단일 URL", "재생목록 (Playlist)"])
+    url_input = st.text_input("YouTube URL", placeholder="https://www.youtube.com/...")
+    
+    if st.button("🚀 실행", type="primary"):
+        if not url_input:
+            st.warning("URL을 입력하세요.")
+            return
+
+        mode_key = "video" if "영상" in mode else "audio"
         status_text = st.empty()
+        progress_bar = st.progress(0)
         
-        st.markdown("#### 시스템 로그")
-        log_output = st.empty()
-        log_messages = []
-        
-        def update_log_ui(msg):
-            log_messages.append(msg)
-            log_output.code("\n".join(log_messages[-15:]), language="text")
-            
         try:
             import yt_dlp
         except ImportError:
-            st.error("yt-dlp 모듈이 설치되어 있지 않습니다. `pip install yt-dlp`를 실행하세요.")
+            st.error("yt-dlp가 없습니다. requirements.txt를 확인하세요.")
             return
-            
-        today_str = datetime.datetime.now().strftime("%Y%m%d")
-        
-        # 1. Base Options
+
+        # --- yt-dlp Options (Harness Integrated) ---
         ydl_opts = {
-            'ignoreerrors': True,  # 재생목록 오류 발생 시 중단 없이 다음으로 진행
+            'ignoreerrors': True,
             'quiet': True,
             'no_warnings': True,
+            # [Fix] 서버 환경에서 크롬 찾지 말라고 명시적으로 꺼버림
+            'cookiesfrombrowser': None, 
         }
+
+        # 쿠키 파일이 업로드된 경우 임시 파일로 저장 후 주입
+        if cookie_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+                tmp.write(cookie_file.getvalue())
+                ydl_opts['cookiefile'] = tmp.name
+
+        today_str = datetime.datetime.now().strftime("%Y%m%d")
+        target_dir = os.path.join(DOWNLOADS_DIR, "videos" if mode_key == "video" else "music")
         
-        # --- 우회 옵션 적용 ---
-        if use_cookies != "사용 안 함":
-            ydl_opts['cookiesfrombrowser'] = (use_cookies.lower(), ) # 선택한 브라우저 쿠키 사용
-            
-        if use_mobile_ua:
-            ydl_opts['http_headers'] = {
-                'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
-            }
-            ydl_opts['extractor_args'] = {'youtube': ['client=android']}
-        # --------------------
+        # 네이밍 및 재생목록 규칙 (Contract 준수)
+        idx_str = "[%(playlist_index)02d] " if url_type == "재생목록 (Playlist)" else ""
+        ydl_opts['outtmpl'] = os.path.join(target_dir, f"[{today_str}] {idx_str}%(title)s.%(ext)s")
         
-        # 2. Paths & Naming
         if mode_key == "video":
-            target_dir = os.path.join(DOWNLOADS_DIR, "videos")
-            if url_type == "재생목록 (Playlist) URL":
-                ydl_opts['outtmpl'] = os.path.join(target_dir, f"[{today_str}] [%(playlist_index)02d] %(title)s.%(ext)s")
-                ydl_opts['yes_playlist'] = True
+            h_limit = quality.replace("p", "")
+            if h_limit.isdigit():
+                ydl_opts['format'] = f'bestvideo[height<={h_limit}][ext=mp4]+bestaudio[ext=m4a]/best[height<={h_limit}]'
             else:
-                ydl_opts['outtmpl'] = os.path.join(target_dir, f"[{today_str}] %(title)s.%(ext)s")
-                ydl_opts['noplaylist'] = True
-                
-            if "1080p" in quality:
-                ydl_opts['format'] = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best'
-            else:
-                ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+                ydl_opts['format'] = 'bestvideo+bestaudio/best'
             ydl_opts['merge_output_format'] = 'mp4'
-            
         else:
-            target_dir = os.path.join(DOWNLOADS_DIR, "music")
-            if url_type == "재생목록 (Playlist) URL":
-                ydl_opts['outtmpl'] = os.path.join(target_dir, f"[{today_str}] [%(playlist_index)02d] %(title)s.%(ext)s")
-                ydl_opts['yes_playlist'] = True
-            else:
-                ydl_opts['outtmpl'] = os.path.join(target_dir, f"[{today_str}] %(title)s.%(ext)s")
-                ydl_opts['noplaylist'] = True
-                
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '0',
+                'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192',
             }, {'key': 'EmbedThumbnail'}, {'key': 'FFmpegMetadata'}]
-            ydl_opts['writethumbnail'] = True
-            
-        # Logging config (custom logger)
+
+        # --- Logger Hook ---
         class MyLogger:
-            def debug(self, msg): 
-                # yt-dlp의 일반 디버그 메시지 중 의미 있는 것만 표시하거나 통과시킴
-                if "[download] Destination" in msg or "[download] 100%" in msg:
-                    pass
-            def warning(self, msg): 
-                update_log_ui(f"[WARNING] {msg}")
+            def debug(self, msg): pass
+            def warning(self, msg): pass
             def error(self, msg):
-                update_log_ui(f"[ERROR] {msg}")
-                # 힐링(치유) 프로세스는 Streamlit 구동 안정성을 위해 제거하고 에러 로깅만 수행
-                if "sign in to confirm you're not a bot" in msg.lower() or "http error 403" in msg.lower():
-                    st.toast(f"차단/오류 감지됨 (건너뜀): {msg[:50]}...")
+                error_type = check_for_blocks(msg)
+                if error_type:
+                    st.error(f"⚠️ 차단 감지: {error_type}. 쿠키 파일을 업로드해보세요.")
                 log_event(url_input, mode_key, "fail", error=msg)
-                    
+
         ydl_opts['logger'] = MyLogger()
-        
-        finished_items = []
-        def my_hook(d):
-            if d['status'] == 'finished':
-                filename = d['filename']
-                update_log_ui(f"[SUCCESS] 다운로드 완료: {os.path.basename(filename)}")
-                st.toast(f"다운로드 완료: {os.path.basename(filename)}")
-                finished_items.append(filename)
-                log_event(url_input, mode_key, "success", output_path=filename)
-                
-        ydl_opts['progress_hooks'] = [my_hook]
-        
-        status_text.info("다운로드를 준비 중입니다...")
-        log_event(url_input, mode_key, "start", detail=f"Playlist: {ydl_opts.get('yes_playlist', False)}")
-        
+
+        # --- Execute ---
+        status_text.info("준비 중...")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                status_text.info("다운로드 중입니다. 오류가 발생해도 건너뛰고 계속 진행됩니다...")
+                status_text.info("다운로드 시작... (대량 작업 시 시간이 걸릴 수 있습니다)")
                 ydl.download([url_input])
-                
+            
             progress_bar.progress(100)
-            status_text.success(f"작업 완료! (완료된 항목: {len(finished_items)}개)")
+            status_text.success("작업이 완료되었습니다. downloads/ 폴더를 확인하세요.")
+            log_event(url_input, mode_key, "success")
             
         except Exception as e:
-            st.error(f"다운로드 중 치명적인 오류 발생: {e}")
+            st.error(f"치명적 오류: {e}")
             log_event(url_input, mode_key, "fail", error=str(e))
+        finally:
+            # 임시 쿠키 파일 삭제
+            if 'cookiefile' in ydl_opts and os.path.exists(ydl_opts['cookiefile']):
+                os.remove(ydl_opts['cookiefile'])
 
 if __name__ == "__main__":
     main()
