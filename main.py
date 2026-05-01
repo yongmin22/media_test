@@ -45,6 +45,11 @@ def main():
         mode = st.radio("다운로드 모드", ["영상 (MP4)", "오디오 (MP3)"])
         quality = st.radio("화질", ["1080p 이하 (기본)", "최고화질"])
         
+        st.divider()
+        st.header("차단 우회 (403 에러 발생 시)")
+        use_mobile_ua = st.checkbox("모바일 기기로 위장 (우회 모드)", help="HTTP 403 에러가 뜰 때 체크해보세요.")
+        use_cookies = st.checkbox("브라우저 쿠키 사용 (Chrome)", help="로그인이 필요한 영상이거나 강력한 차단이 있을 때 사용합니다. 로컬 PC의 크롬 브라우저 쿠키를 가져옵니다.")
+        
     url_type = st.radio("다운로드 소스 선택", ["단일 URL", "재생목록 (Playlist) URL"])
     url_input = st.text_input("YouTube URL 입력", placeholder="https://www.youtube.com/...")
     
@@ -75,6 +80,16 @@ def main():
             'quiet': True,
             'no_warnings': True,
         }
+        
+        # --- 우회 옵션 적용 ---
+        if use_cookies:
+            ydl_opts['cookiesfrombrowser'] = ('chrome', ) # 크롬 브라우저 쿠키 사용
+            
+        if use_mobile_ua:
+            ydl_opts['http_headers'] = {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
+            }
+        # --------------------
         
         # 2. Paths & Naming
         if mode_key == "video":
