@@ -8,7 +8,7 @@ import zipfile
 import subprocess
 from io import BytesIO
 
-# [Harness] 경로 엔트로피 제어: 로컬/클라우드 환경 통합 인식
+# [Harness] 경로 엔트로피 제어
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -20,6 +20,7 @@ except ImportError:
     def check_for_blocks(msg): 
         if "403" in msg or "Forbidden" in msg: return "IP 차단 (403 Forbidden)"
         if "429" in msg: return "요청 과다 (429 Too Many Requests)"
+        if "Sign in" in msg: return "신분 인증 필요 (Cookies required)"
         return None
 
 # --- Configuration ---
@@ -35,22 +36,25 @@ def is_ffmpeg_installed():
 
 def main():
     st.set_page_config(page_title="YT-Harness Direct", page_icon="🚀", layout="wide")
-    st.title("🚀 YouTube Downloader [v2.7 - 최종 돌파 모드]")
+    st.title("🚀 YouTube Downloader [v2.8 - 정밀 진단 모드]")
     
     ffmpeg_available = is_ffmpeg_installed()
     
     with st.sidebar:
         st.header("⚙️ Harness Control")
         if not ffmpeg_available:
-            st.warning("⚠️ FFmpeg 미설치: 720p 제한 및 MP3 변환 불가")
+            st.warning("⚠️ FFmpeg 미설치: 720p 제한")
             
         mode = st.radio("포맷", ["영상 (MP4)", "오디오 (MP3)"])
         quality = st.select_slider("화질", options=["360p", "720p", "1080p"], value="1080p")
         
         st.write("---")
         st.subheader("🛡️ 차단 우회 (쿠키 업로드)")
-        st.info("403 에러가 계속되면 유튜브 로그인 후 'Get cookies.txt'로 받은 파일을 꼭 넣어주세요.")
         cookie_file = st.file_uploader("youtube.com_cookies.txt 업로드", type=["txt"])
+        
+        st.write("---")
+        # [Harness] 실시간 로그 확인 옵션
+        show_raw_logs = st.checkbox("실시간 디버그 로그 표시", value=True)
 
     st.subheader("1단계: 수집 대상 설정")
     url_input = st.text_input("YouTube URL", placeholder="https://www.youtube.com/...")
@@ -60,12 +64,16 @@ def main():
 
     if st.button("🚀 서버 수집 시작", type="primary"):
         if not url_input:
-            st.error("URL을 먼저 입력해 주세요!")
+            st.error("URL을 입력해 주세요.")
             return
 
         st.session_state.delivered_files = [] 
         mode_key = "video" if "영상" in mode else "audio"
         
+        # 로그 수집용 컨테이너
+        log_container = st.empty()
+        raw_log_data = []
+
         with tempfile.TemporaryDirectory() as tmp_work_dir:
             try:
                 import yt_dlp
@@ -76,21 +84,28 @@ def main():
                         fname = d.get('info_dict').get('filepath', d.get('filename'))
                         local_downloads.append(fname)
 
-                # [Harness] 차단 우회 및 안정성 강화 옵션
+                # [Harness] 로그 및 디버깅 옵션 강화
                 ydl_opts = {
-                    'quiet': False,               # 로거를 통해 상세 에러를 잡기 위해 False
+                    'quiet': False, 
                     'no_warnings': False,
                     'progress_hooks': [progress_hook],
                     'cookiesfrombrowser': None,
                     'nocheckcertificate': True,
-                    'ignoreerrors': False,         # [CRITICAL] 에러 발생 시 즉시 멈추고 보고하게 함
-                    'nopart': True,               # .part 파일 대신 직접 다운로드 (경로 꼬임 방지)
-                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                    # [Harness] 최신 유튜브 차단 대응용 클라이언트 위장
-                    'extractor_args': {'youtube': {'player_client': ['android', 'ios']}},
+                    'ignoreerrors': False,
+                    'nopart': True,
+                    'user_agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    # [Harness] 클라이언트 다변화 전략: 유튜브의 클라이언트별 차단 로직을 우회
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['web_safari', 'android', 'ios'],
+                            'skip': ['dash', 'hls']
+                        }
+                    },
+                    'file_access_retries': 5,
+                    'fragment_retries': 10,
                 }
 
-                # 동적 포맷 결정
+                # 포맷 설정
                 if mode_key == "video":
                     h = quality.replace("p", "")
                     if ffmpeg_available:
@@ -105,46 +120,48 @@ def main():
                             'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320',
                         }]
 
-                # [Harness] 쿠키 주입 및 검증
+                # 쿠키 처리
                 if cookie_file:
                     cookie_path = os.path.join(tmp_work_dir, "cookies.txt")
-                    with open(cookie_path, "wb") as f: 
-                        f.write(cookie_file.getvalue())
+                    with open(cookie_path, "wb") as f: f.write(cookie_file.getvalue())
                     ydl_opts['cookiefile'] = cookie_path
-                    st.toast("✅ 쿠키 신분증이 장착되었습니다.")
 
                 ydl_opts['outtmpl'] = os.path.join(tmp_work_dir, '%(title)s.%(ext)s')
 
-                # [Logger] 실시간 에러 포착 센서
-                last_error = []
+                # [Logger] 실시간 로그 캡처 센서
                 class YdlLogger:
-                    def debug(self, msg): pass
-                    def warning(self, msg): pass
+                    def debug(self, msg): 
+                        raw_log_data.append(f"[DEBUG] {msg}")
+                        if show_raw_logs: log_container.code("\n".join(raw_log_data[-10:]))
+                    def warning(self, msg): 
+                        raw_log_data.append(f"[WARN] {msg}")
+                        if show_raw_logs: log_container.code("\n".join(raw_log_data[-10:]))
                     def error(self, msg):
-                        last_error.append(msg)
+                        raw_log_data.append(f"[ERROR] {msg}")
+                        if show_raw_logs: log_container.code("\n".join(raw_log_data[-10:]))
                 
                 ydl_opts['logger'] = YdlLogger()
 
-                with st.status("🏗️ 유튜브 서버에서 데이터 수집 시도 중...", expanded=True) as status:
+                with st.status("🏗️ 유튜브 서버 데이터 수집 중...", expanded=True) as status:
                     try:
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([url_input])
+                            # 1. 정보 추출 시도
+                            info = ydl.extract_info(url_input, download=True)
                         status.update(label="✅ 수집 종료", state="complete")
                     except Exception as download_err:
                         err_msg = str(download_err)
                         block_type = check_for_blocks(err_msg)
-                        if block_type:
-                            status.update(label=f"🛑 {block_type} 발생", state="error")
-                            st.error(f"유튜브가 차단했습니다: {block_type}. 쿠키 파일이 최신인지 확인하세요.")
-                        else:
-                            status.update(label="❌ 오류 발생", state="error")
-                            st.error(f"상세 에러: {err_msg}")
-                        raise download_err # 상위 try로 넘김
+                        status.update(label=f"🛑 {block_type if block_type else '오류 발생'}", state="error")
+                        st.error(f"상세 원인: {err_msg}")
+                        # 로그 창 상단 고정
+                        if not show_raw_logs:
+                            with st.expander("실행 로그 확인"):
+                                st.code("\n".join(raw_log_data))
+                        raise download_err
 
                 # 결과물 확인
                 if local_downloads:
                     for fpath in local_downloads:
-                        # MP3 변환 완료 후 실제 파일명 찾기
                         if mode_key == "audio" and ffmpeg_available:
                             base = os.path.splitext(fpath)[0]
                             if os.path.exists(base + ".mp3"): fpath = base + ".mp3"
@@ -155,22 +172,21 @@ def main():
                                     "name": os.path.basename(fpath),
                                     "data": f.read()
                                 })
-                elif not last_error:
-                    st.warning("⚠️ 파일이 생성되지 않았습니다. URL을 다시 확인해 보세요.")
+                else:
+                    st.warning("⚠️ 파일은 생성되지 않았으나 에러는 발생하지 않았습니다. 로그를 확인해 주세요.")
 
             except Exception as e:
-                # 이미 위에서 에러 처리를 했으므로 로그만 남김
-                pass
+                pass # 이미 처리됨
 
     # --- 2단계: 브라우저 배송 ---
     if st.session_state.delivered_files:
         st.write("---")
-        st.success(f"📦 총 {len(st.session_state.delivered_files)}개의 파일이 배송 대기 중입니다.")
+        st.success(f"📦 총 {len(st.session_state.delivered_files)}개의 파일이 준비되었습니다.")
         
         if len(st.session_state.delivered_files) == 1:
             file_info = st.session_state.delivered_files[0]
             st.download_button(
-                label=f"💾 {file_info['name']} 다운로드 받기",
+                label=f"💾 {file_info['name']} 내 컴퓨터로 저장",
                 data=file_info['data'],
                 file_name=file_info['name'],
                 mime="video/mp4" if file_info['name'].endswith(".mp4") else "audio/mpeg",
